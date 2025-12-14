@@ -62,8 +62,6 @@ struct pkey_pm
     mbedtls_pk_context *pkey;
 
     mbedtls_pk_context *ex_pkey;
-
-    void *rngctx;
 };
 
 unsigned int max_content_len;
@@ -257,7 +255,9 @@ static int ssl_pm_reload_crt(SSL *ssl)
     struct pkey_pm *pkey_pm = (struct pkey_pm *)ssl->cert->pkey->pkey_pm;
     struct x509_pm *crt_pm = (struct x509_pm *)ssl->cert->x509->x509_pm;
 
-    if ((ssl->verify_mode & SSL_VERIFY_PEER) > 0)
+    if ((ssl->verify_mode & SSL_VERIFY_POST_HANDSHAKE) > 0)
+        mode = MBEDTLS_SSL_VERIFY_OPTIONAL;
+    else if ((ssl->verify_mode & SSL_VERIFY_PEER) > 0)
         mode = MBEDTLS_SSL_VERIFY_REQUIRED;
     else if ((ssl->verify_mode & SSL_VERIFY_FAIL_IF_NO_PEER_CERT) > 0)
         mode = MBEDTLS_SSL_VERIFY_OPTIONAL;
@@ -722,7 +722,69 @@ no_mem:
     return -1;
 }
 
-int pkey_pm_new(EVP_PKEY *pk, EVP_PKEY *m_pkey, void *rngctx)
+int x509_pm_load_file(X509 *x, const char *path)
+{
+    int ret;
+    struct x509_pm *x509_pm = (struct x509_pm *)x->x509_pm;
+
+    if (!x509_pm->x509_crt) {
+        x509_pm->x509_crt = ssl_mem_malloc(sizeof(mbedtls_x509_crt) + 80);
+        if (!x509_pm->x509_crt) {
+            SSL_DEBUG(SSL_PLATFORM_ERROR_LEVEL, "no enough memory > (x509_pm->x509_crt)");
+            goto no_mem;
+        }
+        mbedtls_x509_crt_init(x509_pm->x509_crt);
+    }
+
+    ret = mbedtls_x509_crt_parse_file(x509_pm->x509_crt, path);
+    if (ret) {
+        SSL_DEBUG(SSL_PLATFORM_ERROR_LEVEL,
+                  "mbedtls_x509_crt_parse_file return -0x%x", -ret);
+        goto failed;
+    }
+
+    return 0;
+
+failed:
+    mbedtls_x509_crt_free(x509_pm->x509_crt);
+    ssl_mem_free(x509_pm->x509_crt);
+    x509_pm->x509_crt = NULL;
+no_mem:
+    return -1;
+}
+
+int x509_pm_load_path(X509 *x, const char *path)
+{
+    int ret;
+    struct x509_pm *x509_pm = (struct x509_pm *)x->x509_pm;
+
+    if (!x509_pm->x509_crt) {
+        x509_pm->x509_crt = ssl_mem_malloc(sizeof(mbedtls_x509_crt) + 80);
+        if (!x509_pm->x509_crt) {
+            SSL_DEBUG(SSL_PLATFORM_ERROR_LEVEL, "no enough memory > (x509_pm->x509_crt)");
+            goto no_mem;
+        }
+        mbedtls_x509_crt_init(x509_pm->x509_crt);
+    }
+
+    ret = mbedtls_x509_crt_parse_path(x509_pm->x509_crt, path);
+    if (ret) {
+        SSL_DEBUG(SSL_PLATFORM_ERROR_LEVEL,
+                  "mbedtls_x509_crt_parse_path return -0x%x", -ret);
+        goto failed;
+    }
+
+    return 0;
+
+failed:
+    mbedtls_x509_crt_free(x509_pm->x509_crt);
+    ssl_mem_free(x509_pm->x509_crt);
+    x509_pm->x509_crt = NULL;
+no_mem:
+    return -1;
+}
+
+int pkey_pm_new(EVP_PKEY *pk, EVP_PKEY *m_pkey)
 {
     struct pkey_pm *pkey_pm;
 
@@ -731,7 +793,6 @@ int pkey_pm_new(EVP_PKEY *pk, EVP_PKEY *m_pkey, void *rngctx)
         return -1;
 
     pk->pkey_pm = pkey_pm;
-    pkey_pm->rngctx = rngctx;
 
     if (m_pkey) {
         struct pkey_pm *m_pkey_pm = (struct pkey_pm *)m_pkey->pkey_pm;
@@ -762,6 +823,7 @@ int pkey_pm_load(EVP_PKEY *pk, const unsigned char *buffer, int len)
     int ret;
     unsigned char *load_buf;
     struct pkey_pm *pkey_pm = (struct pkey_pm *)pk->pkey_pm;
+    mbedtls_ctr_drbg_context ctr_drbg;
 
     if (pkey_pm->pkey)
         mbedtls_pk_free(pkey_pm->pkey);
@@ -784,14 +846,15 @@ int pkey_pm_load(EVP_PKEY *pk, const unsigned char *buffer, int len)
     load_buf[len] = '\0';
 
     mbedtls_pk_init(pkey_pm->pkey);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
 
 #if defined(MBEDTLS_VERSION_NUMBER) && MBEDTLS_VERSION_NUMBER >= 0x03000000
 #if defined(MBEDTLS_VERSION_NUMBER) && MBEDTLS_VERSION_NUMBER >= 0x03050000
     ret = mbedtls_pk_parse_key(pkey_pm->pkey, load_buf, (unsigned int)len, NULL, 0,
-		    mbedtls_ctr_drbg_random, pkey_pm->rngctx);
+		    mbedtls_ctr_drbg_random, &ctr_drbg);
 #else
     ret = mbedtls_pk_parse_key(pkey_pm->pkey, load_buf, (unsigned int)len + 1, NULL, 0,
-		    mbedtls_ctr_drbg_random, pkey_pm->rngctx);
+		    mbedtls_ctr_drbg_random, &ctr_drbg);
 #endif
 #else
     ret = mbedtls_pk_parse_key(pkey_pm->pkey, load_buf, (unsigned int)len + 1, NULL, 0);
@@ -803,9 +866,12 @@ int pkey_pm_load(EVP_PKEY *pk, const unsigned char *buffer, int len)
         goto failed;
     }
 
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+
     return 0;
 
 failed:
+    mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_pk_free(pkey_pm->pkey);
     ssl_mem_free(pkey_pm->pkey);
     pkey_pm->pkey = NULL;
@@ -993,7 +1059,7 @@ void SSL_set_SSL_CTX(SSL *ssl, SSL_CTX *ctx)
 	if (ssl->cert)
 		ssl_cert_free(ssl->cert);
 	ssl->ctx = ctx;
-	ssl->cert = __ssl_cert_new(ctx->cert, ctx->rngctx);
+	ssl->cert = __ssl_cert_new(ctx->cert);
 
 #if defined(LWS_HAVE_mbedtls_ssl_set_hs_authmode)
 

@@ -22,33 +22,10 @@
 # IN THE SOFTWARE.
 #
 
-if (PICO_SDK_PATH)
-	cmake_minimum_required(VERSION 3.13)
-else()
-	cmake_minimum_required(VERSION 3.5)
-endif()
-include(CheckFunctionExists)
-include(CheckSymbolExists)
-include(CheckIncludeFile)
-include(CheckIncludeFiles)
-include(CheckLibraryExists)
-include(CheckTypeSize)
-include(CheckCSourceCompiles)
+cmake_minimum_required(VERSION 3.10...4.0)
+
 if (PICO_SDK_PATH)
 	include(cmake/pico_sdk_import.cmake)
-endif()
-
-
-if (POLICY CMP0048)
-	cmake_policy(SET CMP0048 NEW)
-endif()
-
-#if (POLICY CMP0024)
-#	cmake_policy(SET CMP0024 NEW)
-#endif()
-
-if (POLICY CMP0075)
-	cmake_policy(SET CMP0075 NEW)
 endif()
 
 # General Advice
@@ -75,6 +52,25 @@ project(libwebsockets C)
 if (LWS_WITH_SECURE_STREAMS_CPP)
 	enable_language(CXX)
 endif()
+
+# On macOS, check for the Apple Silicon Homebrew path and add it to the search prefix.
+# This makes find_package(), find_library(), etc. automatically find things
+# installed in /opt/homebrew on Apple Silicon machines, without breaking
+# the default /usr/local search on older Intel machines.
+if (APPLE)
+    if (EXISTS "/opt/homebrew/bin/brew")
+        list (PREPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+    endif()
+endif()
+
+include(CheckFunctionExists)
+include(CheckSymbolExists)
+include(CheckIncludeFile)
+include(CheckIncludeFiles)
+include(CheckLibraryExists)
+include(CheckTypeSize)
+include(CheckCSourceCompiles)
+include(GNUInstallDirs)
 include(CTest)
 
 if (PICO_SDK_PATH)
@@ -93,7 +89,9 @@ if (ESP_PLATFORM)
 		$ENV{IDF_PATH}/components/xtensa/${CONFIG_IDF_TARGET}/include/
 		$ENV{IDF_PATH}/components/freertos/include/esp_additions
 		$ENV{IDF_PATH}/components/hal/include
+		$ENV{IDF_PATH}/components/esp_rom/${CONFIG_IDF_TARGET}/include/${CONFIG_IDF_TARGET}/
 		$ENV{IDF_PATH}/components/soc/${CONFIG_IDF_TARGET}/include/
+		$ENV{IDF_PATH}/components/soc/${CONFIG_IDF_TARGET}/register/
 		$ENV{IDF_PATH}/components/soc/include/
 		$ENV{IDF_PATH}/components/esp_hw_support/include
 		$ENV{IDF_PATH}/components/hal/${CONFIG_IDF_TARGET}/include/
@@ -362,6 +360,7 @@ else()
 	set(LWS_WITH_LIBCAP OFF)
 endif()
 option(LWS_WITH_MCUFONT_ENCODER "Build the ttf to mcufont encoder" OFF)
+option(LWS_WITH_WAKE_LOGGING "Log each wake reason" OFF)
 
 #
 # Compressed backtraces
@@ -387,6 +386,14 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
        set(LWS_SUPPRESS_DEPRECATED_API_WARNINGS 1)
 endif()
 
+if (MSVC)
+	option(LWS_MSVC_STATIC_RUNTIME "Link to static MSVC runtime" OFF)
+endif()
+
+
+if (DEFINED CACHE{LIB_SUFFIX})
+	message(WARNING "LIB_SUFFIX is deprecated and has no effect. Use CMAKE_INSTALL_LIBDIR and/or LWS_INSTALL_LIB_DIR instead.")
+endif()
 
 #
 # to use miniz, enable both LWS_WITH_ZLIB and LWS_WITH_MINIZ
@@ -410,6 +417,16 @@ macro(add_subdir_include_directories arg1)
 	add_subdirectory(${arg1})
 	include_directories(${_CMAKE_INC_LIST})
 endmacro()
+
+macro(add_subdir_include_directories_local arg1)
+	add_subdirectory(${arg1})
+	list(APPEND CMAKE_INC_LIST_TEMP ${_CMAKE_INC_LIST})
+endmacro()
+
+macro(add_subdir_include_directories_local_end)
+	set(_CMAKE_INC_LIST ${CMAKE_INC_LIST_TEMP} PARENT_SCOPE)
+endmacro()
+
 
 macro(exports_to_parent_scope)
 	set(SOURCES ${SOURCES} PARENT_SCOPE)
@@ -477,7 +494,7 @@ set(PACKAGE "libwebsockets")
 set(CPACK_RPM_PACKAGE_LICENSE "MIT")
 set(CPACK_PACKAGE_NAME "${PACKAGE}")
 set(CPACK_PACKAGE_VERSION_MAJOR "4")
-set(CPACK_PACKAGE_VERSION_MINOR "3")
+set(CPACK_PACKAGE_VERSION_MINOR "5")
 set(CPACK_PACKAGE_VERSION_PATCH_NUMBER "99")
 
 set(CPACK_PACKAGE_VERSION_PATCH "${CPACK_PACKAGE_VERSION_PATCH_NUMBER}-${LWS_BUILD_HASH}")
@@ -487,7 +504,7 @@ set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSIO
 set(CPACK_PACKAGE_VENDOR "andy@warmcat.com")
 set(CPACK_PACKAGE_CONTACT "andy@warmcat.com")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PACKAGE} ${CPACK_PACKAGE_VERSION}")
-set(SOVERSION "19")
+set(SOVERSION "21")
 if(NOT CPACK_GENERATOR)
     if(UNIX)
         set(CPACK_GENERATOR "TGZ")
@@ -531,22 +548,19 @@ if (CMAKE_TOOLCHAIN_FILE)
 	message(STATUS "CMAKE_TOOLCHAIN_FILE='${CMAKE_TOOLCHAIN_FILE}'")
 endif()
 
-if (NOT LIB_SUFFIX)
-	set(LIB_SUFFIX "")
-endif()
-
 if (WIN32)
 	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/win32port/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/win32port/version.rc @ONLY)
 	set(RESOURCES ${CMAKE_CURRENT_BINARY_DIR}/win32port/version.rc)
+       include_directories("${CMAKE_CURRENT_SOURCE_DIR}/win32port/win32helpers")
 endif()
 
 include_directories(include)
 
 # Allow the user to override installation directories.
-set(LWS_INSTALL_LIB_DIR       lib CACHE PATH "Installation directory for libraries")
-set(LWS_INSTALL_BIN_DIR       bin CACHE PATH "Installation directory for executables")
-set(LWS_INSTALL_INCLUDE_DIR   include CACHE PATH "Installation directory for header files")
-set(LWS_INSTALL_EXAMPLES_DIR  bin CACHE PATH "Installation directory for example files")
+set(LWS_INSTALL_LIB_DIR       ${CMAKE_INSTALL_LIBDIR} CACHE PATH "Installation directory for libraries")
+set(LWS_INSTALL_BIN_DIR       ${CMAKE_INSTALL_BINDIR} CACHE PATH "Installation directory for executables")
+set(LWS_INSTALL_INCLUDE_DIR   ${CMAKE_INSTALL_INCLUDEDIR} CACHE PATH "Installation directory for header files")
+set(LWS_INSTALL_EXAMPLES_DIR  ${CMAKE_INSTALL_BINDIR} CACHE PATH "Installation directory for example files")
 
 # if you gave LWS_WITH_MINIZ, point to MINIZ here if not found
 # automatically
@@ -617,7 +631,7 @@ SET(LWS_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 
 # Put absolute path of dynamic libraries into the object code. Some
 # architectures, notably Mac OS X, need this.
-SET(CMAKE_INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/${LWS_INSTALL_LIB_DIR}${LIB_SUFFIX}")
+SET(CMAKE_INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/${LWS_INSTALL_LIB_DIR}")
 
 if (LWS_WITHOUT_BUILTIN_SHA1)
 	set(LWS_SHA1_USE_OPENSSL_NAME 1)
@@ -682,6 +696,7 @@ CHECK_C_SOURCE_COMPILES("#include <pthread.h>\nvoid main(void) { while(1) ; } vo
 CHECK_C_SOURCE_COMPILES("#include <inttypes.h>\nvoid main(void) { while(1) ; } void xxexit(void){}" LWS_HAVE_INTTYPES_H)
 CHECK_C_SOURCE_COMPILES("#include <sys/resource.h>\nvoid main(void) { while(1) ; } void xxexit(void){}" LWS_HAVE_SYS_RESOURCE_H)
 CHECK_C_SOURCE_COMPILES("#include <linux/ipv6.h>\nvoid main(void) { while(1) ; } void xxexit(void){}" LWS_HAVE_LINUX_IPV6_H)
+CHECK_C_SOURCE_COMPILES("#include <sys/types.h>\n#include <net/if_ether.h>\n void main(void) { while (1) ; } void xxexit(void){}" LWS_HAVE_NET_IF_ETHER_H)
 if (LWS_HAVE_SYS_TYPES_H)
 	CHECK_C_SOURCE_COMPILES("#include <sys/types.h>\n#include <net/ethernet.h>\n void main(void) { while (1) ; } void xxexit(void){}" LWS_HAVE_NET_ETHERNET_H)
 else()
@@ -689,6 +704,9 @@ else()
 endif()
 CHECK_C_SOURCE_COMPILES("#include <systemd/sd-daemon.h>\nvoid main(void) { while(1) ; } void xxexit(void){}" LWS_HAVE_SYSTEMD_H)
 
+if (${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
+	unset(LWS_HAVE_CTIME_R CACHE)
+endif()
 
 
 if (LWS_EXT_PTHREAD_INCLUDE_DIR)
@@ -713,7 +731,7 @@ if (LWS_EXT_PTHREAD_INCLUDE_DIR)
 	set(CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES};${LWS_EXT_PTHREAD_INCLUDE_DIR})
 	include_directories(${LWS_EXT_PTHREAD_INCLUDE_DIR})
 
-	list(APPEND LIB_LIST_AT_END ${LWS_EXT_PTHREAD_LIBRARIES})
+#	list(APPEND LIB_LIST_AT_END ${LWS_EXT_PTHREAD_LIBRARIES})
 	set(CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS} " -DHAVE_STRUCT_TIMESPEC=1")
 endif()
 
@@ -915,7 +933,7 @@ if ((CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX) AND NOT LWS_WITHOUT_TE
 	# jeez clang understands -pthread but dies if he sees it at link time!
 	# http://stackoverflow.com/questions/2391194/what-is-gs-pthread-equiv-in-clang
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread" )
-	list(APPEND LIB_LIST_AT_END -lpthread)
+	# list(APPEND LIB_LIST_AT_END -lpthread)
     endif()
 endif()
 
@@ -926,6 +944,13 @@ if (COMPILER_IS_CLANG)
 	if (UNIX AND LWS_HAVE_PTHREAD_H)
 		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread -Wno-error=unused-command-line-argument" )
 	endif()
+endif()
+
+if (${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
+		list(APPEND LIB_LIST_AT_END -lsocket)
+		if ((CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX))
+			set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-conversion")
+		endif()
 endif()
 
 if (WINCE)
@@ -944,6 +969,31 @@ if (MSVC)
 		add_compile_options(/Zc:preprocessor /wd5105)
 	else()
 		add_compile_options(/experimental:preprocessor /wd5105)
+	endif()
+	if (LWS_MSVC_STATIC_RUNTIME AND NOT LWS_WITH_STATIC)
+		message(FATAL_ERROR "Incompatible options: when LWS_MSVC_STATIC_RUNTIME=ON, must also set LWS_WITH_STATIC=ON")
+	endif()
+	if (LWS_MSVC_STATIC_RUNTIME)
+		if (LWS_WITH_SHARED)
+			message(FATAL_ERROR "Incompatible options: when LWS_MSVC_STATIC_RUNTIME=ON, must also set LWS_WITH_SHARED=OFF")
+		endif()
+		if (${CMAKE_VERSION} VERSION_GREATER 3.15 OR ${CMAKE_VERSION} VERSION_EQUAL 3.15)
+			set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded$<$<CONFIG:Debug>:Debug>)
+		else()
+			# Link the runtime library statically so that MSVCR*.DLL is not required at runtime.
+			# https://msdn.microsoft.com/en-us/library/2kzt1wy3.aspx
+			# This is achieved by replacing msvc option /MD with /MT and /MDd with /MTd
+			# http://www.cmake.org/Wiki/CMake_FAQ#How_can_I_build_my_MSVC_application_with_a_static_runtime.3F
+			foreach (flag_var
+					CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+					CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+				if(${flag_var} MATCHES "/MD")
+					string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+				endif()
+			endforeach()
+		endif()
+	else()
+		set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded$<$<CONFIG:Debug>:Debug>DLL)
 	endif()
 endif(MSVC)
 
@@ -1050,7 +1100,7 @@ add_subdirectory(lib)
 if(WIN32 AND NOT CYGWIN)
   set(DEF_INSTALL_CMAKE_DIR cmake)
 else()
-  set(DEF_INSTALL_CMAKE_DIR lib${LIB_SUFFIX}/cmake/libwebsockets)
+  set(DEF_INSTALL_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/libwebsockets)
 endif()
                 
 configure_file(${PROJECT_SOURCE_DIR}/cmake/LwsCheckRequirements.cmake
@@ -1118,7 +1168,6 @@ configure_file(
        
 add_custom_command(
 		OUTPUT ${PROJECT_BINARY_DIR}/include/lws_config.h
-			${PROJECT_BINARY_DIR}/include/libwebsockets
 			${PROJECT_BINARY_DIR}/include/libwebsockets.h
 		COMMENT "Creating build include dir"
 		COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/include/libwebsockets.h
